@@ -1,5 +1,5 @@
 {
-  "name": "her-voice-pwa",
+  "name": "clara-health",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -12,6 +12,7 @@
   "dependencies": {
     "@google/genai": "^1.29.0",
     "clsx": "^2.1.1",
+    "firebase": "^11.0.0",
     "framer-motion": "^12.4.7",
     "html-to-image": "^1.11.13",
     "html2canvas": "^1.4.1",
