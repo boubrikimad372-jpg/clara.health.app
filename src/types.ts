@@ -66,7 +66,7 @@ export const TRANSLATIONS = {
       new: "Start New Assessment",
       copied: "Copied!",
       captureInstruction: "💡 You can now download the official PDF report to share with your doctor.",
-      footer: "HER VOICE - CLINICAL ASSISTANT",
+      footer: "CLARA - CLINICAL ASSISTANT",
     },
     toggle: "العربية",
   },
@@ -119,7 +119,7 @@ export const TRANSLATIONS = {
       new: "بدء تقييم جديد",
       copied: "تم النسخ!",
       captureInstruction: "💡 يمكنك الآن تحميل التقرير الطبي الرسمي بصيغة PDF لمشاركته مع طبيبك.",
-      footer: "HER VOICE - CLINICAL ASSISTANT",
+      footer: "CLARA - CLINICAL ASSISTANT",
     },
     toggle: "English",
   }
