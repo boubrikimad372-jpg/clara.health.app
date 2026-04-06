@@ -98,7 +98,7 @@ export async function analyzeExperience(userData: {
   const ai = new GoogleGenAI({ apiKey });
 
   const prompt = `
-    ROLE: Her Voice - Clinical Triage Expert.
+    ROLE: Clara - Clinical Triage Expert.
     MISSION: Transform patient symptoms into a deep, respectful 2-frame clinical report.
     
     STRICT LANGUAGE DIRECTIVE: 
