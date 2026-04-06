@@ -1,6 +1,6 @@
 {
-  "name": "Her Voice",
-  "short_name": "HerVoice",
+  "name": "Clara",
+  "short_name": "Clara",
   "description": "A supportive PWA for women, providing a safe space for expression and guidance.",
   "start_url": "/",
   "display": "standalone",
@@ -8,12 +8,12 @@
   "theme_color": "#cf7e7e",
   "icons": [
     {
-      "src": "https://picsum.photos/seed/hervoice/192/192",
+      "src": "https://picsum.photos/seed/clara/192/192",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "https://picsum.photos/seed/hervoice/512/512",
+      "src": "https://picsum.photos/seed/clara/512/512",
       "sizes": "512x512",
       "type": "image/png"
     }
