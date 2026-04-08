@@ -1,90 +1,103 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import {
+  getApiKey,
+  validateUserData,
+  validateLanguage,
+  buildNarrativePrompt,
+  type OutputLanguage,
+  type NarrativeRequestBody,
+} from './_shared';
 
-const apiKey = process.env.GEMINI_API_KEY || '';
-
-// ─── Language helpers ─────────────────────────────────────────────────────────
-const OUTPUT_LANG_NAMES: Record<string, string> = {
-  EN: 'English',
-  AR: 'Arabic',
-  HI: 'Hindi',
-  UR: 'Urdu',
-};
-
-const FIRST_PERSON_STARTERS: Record<string, string> = {
-  EN: 'I feel / My pain started / I noticed',
-  AR: 'أشعر بـ / بدأ ألمي منذ / لاحظتُ أن',
-  HI: 'मुझे महसूस हो रहा है / मेरा दर्द शुरू हुआ / मैंने देखा',
-  UR: 'مجھے محسوس ہو رہا ہے / میرا درد شروع ہوا / میں نے محسوس کیا',
-};
+// ─── Timeout ──────────────────────────────────────────────────────────────────
+const STREAM_TIMEOUT_MS = 45_000;
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // ── Method check ──
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  // ── API Key check ──
+  let apiKey: string;
   try {
-    const { userData, outputLanguage = 'EN' } = req.body;
+    apiKey = getApiKey();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'API key error';
+    console.error('API key error:', message);
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
 
-    if (!userData?.intakeText) {
-      return res.status(400).json({ error: 'intakeText is required' });
+  // ── Request validation ──
+  const body = req.body as NarrativeRequestBody;
+  const { userData, outputLanguage } = body ?? {};
+
+  if (!validateUserData(userData)) {
+    return res.status(400).json({
+      error: 'Invalid request: userData must include a non-empty intakeText and seenDoctorBefore (boolean)',
+    });
+  }
+
+  const outLang: OutputLanguage = validateLanguage(outputLanguage) ? outputLanguage : 'EN';
+
+  // ── Streaming headers ──
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  res.setHeader('Cache-Control', 'no-cache, no-store');
+  res.setHeader('X-Accel-Buffering', 'no'); // تعطيل Nginx buffering في Vercel
+
+  // ── Client disconnect detection ──
+  let clientDisconnected = false;
+  req.on('close', () => {
+    clientDisconnected = true;
+  });
+
+  // ── Timeout controller ──
+  const timeoutId = setTimeout(() => {
+    if (!res.writableEnded) {
+      console.error('narrative stream timed out');
+      res.end();
     }
+  }, STREAM_TIMEOUT_MS);
 
-    const langName = OUTPUT_LANG_NAMES[outputLanguage] || 'English';
-    const starters = FIRST_PERSON_STARTERS[outputLanguage] || FIRST_PERSON_STARTERS['EN'];
+  try {
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
-    const prompt = `
-You are Clara — a medical communication assistant writing a patient's personal clinical statement.
+    const prompt = buildNarrativePrompt(userData, outLang);
 
-TASK: Write a detailed first-person clinical narrative (150–200 words) in ${langName}.
-
-STRICT RULES:
-- Write ONLY in ${langName}.
-- Use FIRST PERSON exclusively. Use phrases like: ${starters}
-- NEVER use "The patient", "She feels", "The user", or any third-person reference.
-- Write as if YOU ARE the patient speaking directly to her doctor.
-- Be descriptive, specific, and emotionally precise.
-- Include: symptom onset, location, character of pain, aggravating/relieving factors, associated symptoms.
-${outputLanguage === 'AR' ? '- Add English medical terms in brackets for clinical precision.' : ''}
-
-PATIENT DATA:
-- Age: ${userData.age || 'Not provided'}
-- Initial description: "${userData.intakeText}"
-- Medical history: ${userData.seenDoctorBefore
-      ? `Has seen a doctor. Findings: "${userData.doctorFindings || 'None'}"`
-      : 'No prior doctor visit.'}
-- Detailed answers: ${JSON.stringify(userData.interviewAnswers || {})}
-
-RESPOND WITH ONLY the narrative text. No labels, no JSON, no headers, no preamble.
-`;
-
-    const ai = new GoogleGenAI({ apiKey });
-
-    // ─── إعداد الـ streaming response ────────────────────────────────────────
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    res.setHeader('Transfer-Encoding', 'chunked');
-    res.setHeader('Cache-Control', 'no-cache');
-
-    const stream = await ai.models.generateContentStream({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
+    const streamResult = await model.generateContentStream({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
 
-    for await (const chunk of stream) {
-      const text = chunk.text ?? '';
+    // ── Stream chunks to client ──
+    for await (const chunk of streamResult.stream) {
+      // إيقاف الـ stream إذا قطع المستخدم الاتصال
+      if (clientDisconnected || res.writableEnded) {
+        console.log('Client disconnected — stopping stream');
+        break;
+      }
+
+      const text = chunk.text();
       if (text) {
         res.write(text);
       }
     }
 
-    res.end();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    console.error('narrative stream error:', message);
 
-  } catch (err: any) {
-    console.error('narrative error:', err);
+    // إرسال رسالة خطأ للـ stream إذا لم يُرسل شيء بعد
     if (!res.headersSent) {
-      return res.status(500).json({ error: err.message || 'Internal server error' });
+      res.status(500).json({ error: 'Stream failed. Please try again.' });
+      return;
     }
-    res.end();
+  } finally {
+    clearTimeout(timeoutId);
+    if (!res.writableEnded) {
+      res.end();
+    }
   }
 }
