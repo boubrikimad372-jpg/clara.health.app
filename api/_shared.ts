@@ -1,5 +1,4 @@
-import { Type } from '@google/genai';
-
+import { GoogleGenerativeAI } from '@google/generative-ai';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type OutputLanguage = 'EN' | 'AR' | 'HI' | 'UR';
