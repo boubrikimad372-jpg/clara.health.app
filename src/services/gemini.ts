@@ -22,16 +22,18 @@ export interface AnalysisResult {
   };
 }
 
-// ─── CALL 1: Structured JSON (عبر Vercel API) ─────────────────────────────────
+interface UserData {
+  intakeText: string;
+  age?: string;
+  seenDoctorBefore: boolean;
+  doctorFindings?: string;
+  interviewAnswers?: Record<string, string>;
+}
+
+// ─── CALL 1: Structured JSON ──────────────────────────────────────────────────
 
 export async function analyzeStructured(
-  userData: {
-    intakeText: string;
-    age?: string;
-    seenDoctorBefore: boolean;
-    doctorFindings?: string;
-    interviewAnswers?: Record<string, string>;
-  },
+  userData: UserData,
   uiLanguage: OutputLanguage = 'EN',
   outputLanguage: OutputLanguage = 'EN'
 ): Promise<AnalysisResult> {
@@ -42,23 +44,30 @@ export async function analyzeStructured(
   });
 
   if (!response.ok) {
-    const err = await response.json().catch(() => ({ error: 'Unknown error' }));
-    throw new Error(err.error || 'Failed to analyze');
+    let errorMessage = `Server error: ${response.status}`;
+    try {
+      const errBody = await response.json() as { error?: string };
+      if (errBody.error) errorMessage = errBody.error;
+    } catch {
+      // JSON parse failed — use default message
+    }
+    throw new Error(errorMessage);
   }
 
-  return response.json() as Promise<AnalysisResult>;
+  let result: unknown;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error('Invalid response from server');
+  }
+
+  return result as AnalysisResult;
 }
 
-// ─── CALL 2: Streaming narrative (عبر Vercel API) ────────────────────────────
+// ─── CALL 2: Streaming narrative ──────────────────────────────────────────────
 
 export async function streamNarrative(
-  userData: {
-    intakeText: string;
-    age?: string;
-    seenDoctorBefore: boolean;
-    doctorFindings?: string;
-    interviewAnswers?: Record<string, string>;
-  },
+  userData: UserData,
   outputLanguage: OutputLanguage = 'EN',
   onChunk: (chunk: string) => void,
   onDone: (fullText: string) => void,
@@ -72,7 +81,14 @@ export async function streamNarrative(
     });
 
     if (!response.ok) {
-      throw new Error(`Narrative API error: ${response.status}`);
+      let errorMessage = `Narrative server error: ${response.status}`;
+      try {
+        const errBody = await response.json() as { error?: string };
+        if (errBody.error) errorMessage = errBody.error;
+      } catch {
+        // use default message
+      }
+      throw new Error(errorMessage);
     }
 
     if (!response.body) {
@@ -83,34 +99,31 @@ export async function streamNarrative(
     const decoder = new TextDecoder();
     let fullText = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const text = decoder.decode(value, { stream: true });
-      if (text) {
-        fullText += text;
-        onChunk(text);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        if (text) {
+          fullText += text;
+          onChunk(text);
+        }
       }
+    } finally {
+      reader.releaseLock();
     }
 
     onDone(fullText);
 
-  } catch (err) {
+  } catch (err: unknown) {
     onError(err);
   }
 }
 
-// ─── Legacy wrapper (kept for backward compatibility) ─────────────────────────
+// ─── Legacy wrapper ───────────────────────────────────────────────────────────
 
 export async function analyzeExperience(
-  userData: {
-    intakeText: string;
-    age?: string;
-    seenDoctorBefore: boolean;
-    doctorFindings?: string;
-    interviewAnswers?: Record<string, string>;
-  },
+  userData: UserData,
   uiLanguage: OutputLanguage = 'EN',
   outputLanguage: OutputLanguage = 'EN'
 ): Promise<AnalysisResult> {
