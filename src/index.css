@@ -72,6 +72,9 @@
   --color-amber-900: #78350f;
 
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --animate-shimmer: shimmer 1.8s linear infinite;
+  --animate-pulse-soft: pulse-soft 3s ease-in-out infinite;
 }
 
 @layer base {
