@@ -5,7 +5,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export type Language = 'EN' | 'AR';
+export type Language = 'EN' | 'AR' | 'HI' | 'UR';
 
 export interface UserData {
   name?: string;
@@ -16,4 +16,4 @@ export interface UserData {
   doctorFindings?: string;
 }
 
-export type Screen = 'DISCLAIMER' | 'WELCOME' | 'INTAKE' | 'DEMOGRAPHICS' | 'MEDICAL_HISTORY' | 'ANALYSIS' | 'RESULTS';
+export type Screen = 'DISCLAIMER' | 'WELCOME' | 'INTAKE' | 'DEMOGRAPHICS' | 'MEDICAL_HISTORY' | 'OUTPUT_LANGUAGE' | 'ANALYSIS' | 'RESULTS';
