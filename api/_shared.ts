@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type OutputLanguage = 'EN' | 'AR' | 'HI' | 'UR';
@@ -35,7 +36,7 @@ export const FIRST_PERSON_STARTERS: Record<OutputLanguage, string> = {
   EN: 'I feel / My pain started / I noticed',
   AR: 'أشعر بـ / بدأ ألمي منذ / لاحظتُ أن',
   HI: 'मुझे महसूस हो रहा है / मेरा दर्द शुरू हुआ / मैंने देखा',
-  UR: 'مجھے محسوس ہو رہا ہے / میرا درد شروع ہوا / میں نے محسوس کیا',
+  UR: 'مجھے محسوس ہو رہا ہے / میرا दर्द शुरू हुआ / میں نے محسوس کیا',
 };
 
 export const VALID_LANGUAGES: OutputLanguage[] = ['EN', 'AR', 'HI', 'UR'];
@@ -67,21 +68,21 @@ export function validateLanguage(lang: unknown): lang is OutputLanguage {
   return typeof lang === 'string' && VALID_LANGUAGES.includes(lang as OutputLanguage);
 }
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
+// ─── Schema (Fixed to use SchemaType) ─────────────────────────────────────────
 
 export const ANALYSIS_SCHEMA = {
-  type: Type.OBJECT,
+  type: SchemaType.OBJECT,
   properties: {
     steps: {
-      type: Type.ARRAY,
+      type: SchemaType.ARRAY,
       items: {
-        type: Type.OBJECT,
+        type: SchemaType.OBJECT,
         properties: {
-          category: { type: Type.STRING },
-          question: { type: Type.STRING },
+          category: { type: SchemaType.STRING },
+          question: { type: SchemaType.STRING },
           suggestions: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+            type: SchemaType.ARRAY,
+            items: { type: SchemaType.STRING },
             description: 'Exactly 4 quick reply options.',
           },
         },
@@ -89,46 +90,44 @@ export const ANALYSIS_SCHEMA = {
       },
     },
     guidance: {
-      type: Type.OBJECT,
+      type: SchemaType.OBJECT,
       properties: {
-        tips: { type: Type.ARRAY, items: { type: Type.STRING } },
+        tips: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
         potentialConditions: {
-          type: Type.ARRAY,
+          type: SchemaType.ARRAY,
           items: {
-            type: Type.OBJECT,
+            type: SchemaType.OBJECT,
             properties: {
-              name: { type: Type.STRING },
-              explanation: { type: Type.STRING },
+              name: { type: SchemaType.STRING },
+              explanation: { type: SchemaType.STRING },
             },
             required: ['name', 'explanation'],
           },
         },
-        urgency: { type: Type.STRING, enum: ['Green', 'Yellow', 'Red'] },
+        urgency: { type: SchemaType.STRING, enum: ['Green', 'Yellow', 'Red'] },
       },
       required: ['tips', 'potentialConditions', 'urgency'],
     },
     clinicalReport: {
-      type: Type.OBJECT,
+      type: SchemaType.OBJECT,
       properties: {
-        narrative: { type: Type.STRING },
+        narrative: { type: SchemaType.STRING },
         summaryTable: {
-          type: Type.ARRAY,
+          type: SchemaType.ARRAY,
           items: {
-            type: Type.OBJECT,
+            type: SchemaType.OBJECT,
             properties: {
-              label: { type: Type.STRING },
-              value: { type: Type.STRING },
+              label: { type: SchemaType.STRING },
+              value: { type: SchemaType.STRING },
             },
             required: ['label', 'value'],
           },
         },
-        doctorQuestions: { type: Type.ARRAY, items: { type: Type.STRING } },
+        doctorQuestions: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
       },
       required: ['narrative', 'summaryTable', 'doctorQuestions'],
     },
   },
-  // steps اختياري عند وجود إجابات — لكن Schema يجعلها مطلوبة دائماً
-  // الحل: نجعلها مطلوبة دائماً ونتركها فارغة [] عند وجود إجابات
   required: ['steps', 'guidance', 'clinicalReport'],
 };
 
@@ -216,4 +215,4 @@ PATIENT DATA:
 
 RESPOND WITH ONLY the narrative text. No labels, no JSON, no headers, no preamble.
 `;
-}
+    }
