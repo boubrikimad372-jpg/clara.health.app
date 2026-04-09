@@ -1,30 +1,182 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import {
-  getApiKey,
-  validateUserData,
-  validateLanguage,
-  buildStructuredPrompt,
-  ANALYSIS_SCHEMA,
-  type OutputLanguage,
-  type AnalyzeRequestBody,
-} from './_shared';
+import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type OutputLanguage = 'EN' | 'AR' | 'HI' | 'UR';
+
+interface UserData {
+  intakeText: string;
+  age?: string;
+  seenDoctorBefore: boolean;
+  doctorFindings?: string;
+  interviewAnswers?: Record<string, string>;
+}
+
+interface AnalyzeRequestBody {
+  userData: UserData;
+  uiLanguage?: OutputLanguage;
+  outputLanguage?: OutputLanguage;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const OUTPUT_LANG_NAMES: Record<OutputLanguage, string> = {
+  EN: 'English',
+  AR: 'Arabic',
+  HI: 'Hindi',
+  UR: 'Urdu',
+};
+
+const VALID_LANGUAGES: OutputLanguage[] = ['EN', 'AR', 'HI', 'UR'];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getApiKey(): string {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key || key.trim() === '') {
+    throw new Error('GEMINI_API_KEY is not configured in Vercel Environment Variables.');
+  }
+  return key.trim();
+}
+
+function validateUserData(userData: unknown): userData is UserData {
+  if (!userData || typeof userData !== 'object') return false;
+  const u = userData as Record<string, unknown>;
+  if (typeof u.intakeText !== 'string' || u.intakeText.trim() === '') return false;
+  if (typeof u.seenDoctorBefore !== 'boolean') return false;
+  if (u.age !== undefined && typeof u.age !== 'string') return false;
+  if (u.doctorFindings !== undefined && typeof u.doctorFindings !== 'string') return false;
+  if (u.interviewAnswers !== undefined && typeof u.interviewAnswers !== 'object') return false;
+  return true;
+}
+
+function validateLanguage(lang: unknown): lang is OutputLanguage {
+  return typeof lang === 'string' && VALID_LANGUAGES.includes(lang as OutputLanguage);
+}
+
+// ─── Schema ───────────────────────────────────────────────────────────────────
+
+const ANALYSIS_SCHEMA = {
+  type: SchemaType.OBJECT,
+  properties: {
+    steps: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          category: { type: SchemaType.STRING },
+          question: { type: SchemaType.STRING },
+          suggestions: {
+            type: SchemaType.ARRAY,
+            items: { type: SchemaType.STRING },
+            description: 'Exactly 4 quick reply options.',
+          },
+        },
+        required: ['category', 'question', 'suggestions'],
+      },
+    },
+    guidance: {
+      type: SchemaType.OBJECT,
+      properties: {
+        tips: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+        potentialConditions: {
+          type: SchemaType.ARRAY,
+          items: {
+            type: SchemaType.OBJECT,
+            properties: {
+              name: { type: SchemaType.STRING },
+              explanation: { type: SchemaType.STRING },
+            },
+            required: ['name', 'explanation'],
+          },
+        },
+        urgency: { type: SchemaType.STRING, enum: ['Green', 'Yellow', 'Red'] },
+      },
+      required: ['tips', 'potentialConditions', 'urgency'],
+    },
+    clinicalReport: {
+      type: SchemaType.OBJECT,
+      properties: {
+        narrative: { type: SchemaType.STRING },
+        summaryTable: {
+          type: SchemaType.ARRAY,
+          items: {
+            type: SchemaType.OBJECT,
+            properties: {
+              label: { type: SchemaType.STRING },
+              value: { type: SchemaType.STRING },
+            },
+            required: ['label', 'value'],
+          },
+        },
+        doctorQuestions: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+      },
+      required: ['narrative', 'summaryTable', 'doctorQuestions'],
+    },
+  },
+  required: ['steps', 'guidance', 'clinicalReport'],
+};
+
+// ─── Prompt ───────────────────────────────────────────────────────────────────
+
+function buildStructuredPrompt(userData: UserData, uiLang: OutputLanguage, outputLang: OutputLanguage): string {
+  const outputLangName = OUTPUT_LANG_NAMES[outputLang];
+  const interviewLangName = OUTPUT_LANG_NAMES[uiLang];
+  const hasAnswers = userData.interviewAnswers && Object.keys(userData.interviewAnswers).length > 0;
+
+  return `
+ROLE: Clara — Clinical Triage Expert.
+MISSION: Transform patient symptoms into a respectful 2-frame clinical report.
+
+LANGUAGE DIRECTIVE:
+- Interview questions (steps): ${interviewLangName}.
+- Final clinical report (guidance + clinicalReport): ${outputLangName}.
+- Accept any dialect or informal language as input — understand it fully.
+- If outputLanguage is Arabic, include English medical terms in brackets.
+
+INPUT:
+- Age: ${userData.age || 'Not provided'}
+- Description: "${userData.intakeText}"
+- Medical history: ${userData.seenDoctorBefore
+    ? `Has seen doctor. Findings: "${userData.doctorFindings || 'None'}"`
+    : 'No prior doctor visit.'}
+- Interview answers: ${JSON.stringify(userData.interviewAnswers || {})}
+
+${hasAnswers
+    ? `TASK 1 — INTERVIEW STEPS: Return steps as an empty array [] since interview is complete.`
+    : `TASK 1 — INTERVIEW STEPS:
+Generate EXACTLY 8 follow-up questions in ${interviewLangName}.
+Each must have exactly 4 suggestions in the same language.
+8th question: ask if there is anything else she would like to add.`
+  }
+
+TASK 2 — CLINICAL OUTPUT (all in ${outputLangName}):
+
+FRAME 1 — GUIDANCE:
+- tips: 4 actionable, empathetic tips.
+- potentialConditions: 2-3 medical possibilities with simple explanations.
+- urgency: Green (Routine) / Yellow (See doctor soon) / Red (Emergency).
+
+FRAME 2 — CLINICAL RECORD:
+- narrative: Write exactly ONE sentence as a placeholder only (e.g. "I will describe my symptoms to my doctor."). The full narrative is generated by a separate call.
+- summaryTable: Age (MUST BE "${userData.age || 'N/A'}"), Pain Scale, Location, Duration.
+- doctorQuestions: 4 first-person questions to ask the doctor.
+
+CRITICAL: narrative must be a 1-sentence placeholder. Nothing more.
+`;
+}
+
+// ─── Handler ──────────────────────────────────────────────────────────────────
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // ── CORS ──
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  // ── API Key ──
   let apiKey: string;
   try {
     apiKey = getApiKey();
@@ -34,7 +186,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(500).json({ error: 'Server configuration error: GEMINI_API_KEY is missing' });
   }
 
-  // ── Validate request ──
   const body = req.body as AnalyzeRequestBody;
   const { userData, uiLanguage, outputLanguage } = body ?? {};
 
@@ -48,7 +199,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const outLang: OutputLanguage = validateLanguage(outputLanguage) ? outputLanguage : 'EN';
 
   try {
-    // ── Build Gemini client ──
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: 'gemini-2.0-flash',
@@ -58,14 +208,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       },
     });
 
-    // ── Build prompt ──
     const prompt = buildStructuredPrompt(userData, uiLang, outLang);
-
-    // ── Call Gemini ──
     const result = await model.generateContent(prompt);
     const text = result.response.text();
 
-    // ── Parse JSON response ──
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
