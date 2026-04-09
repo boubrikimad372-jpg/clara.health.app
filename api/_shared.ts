@@ -47,7 +47,7 @@ export const VALID_LANGUAGES: OutputLanguage[] = ['EN', 'AR', 'HI', 'UR'];
 export function getApiKey(): string {
   const key = process.env.GEMINI_API_KEY;
   if (!key || key.trim() === '') {
-    throw new Error('GEMINI_API_KEY is not set in environment variables');
+    throw new Error('GEMINI_API_KEY is not configured. Add it in Vercel Dashboard → Settings → Environment Variables (no VITE_ prefix), then redeploy.');
   }
   return key.trim();
 }
