@@ -1,3 +1,4 @@
+// types.ts
 import { Language, Screen, UserData } from './lib/utils';
 
 export interface AppState {
