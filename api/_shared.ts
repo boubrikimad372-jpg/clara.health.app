@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+// shared.ts
+import { SchemaType } from '@google/generative-ai';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ export const FIRST_PERSON_STARTERS: Record<OutputLanguage, string> = {
   EN: 'I feel / My pain started / I noticed',
   AR: 'أشعر بـ / بدأ ألمي منذ / لاحظتُ أن',
   HI: 'मुझे महसूस हो रहा है / मेरा दर्द शुरू हुआ / मैंने देखा',
-  UR: 'مجھے محسوس ہو رہا ہے / میرا दर्द शुरू हुआ / میں نے محسوس کیا',
+  UR: 'مجھے محسوس ہو رہا ہے / میرا درد شروع ہوا / میں نے محسوس کیا',
 };
 
 export const VALID_LANGUAGES: OutputLanguage[] = ['EN', 'AR', 'HI', 'UR'];
@@ -68,7 +69,7 @@ export function validateLanguage(lang: unknown): lang is OutputLanguage {
   return typeof lang === 'string' && VALID_LANGUAGES.includes(lang as OutputLanguage);
 }
 
-// ─── Schema (Fixed to use SchemaType) ─────────────────────────────────────────
+// ─── Schema ───────────────────────────────────────────────────────────────────
 
 export const ANALYSIS_SCHEMA = {
   type: SchemaType.OBJECT,
@@ -215,4 +216,4 @@ PATIENT DATA:
 
 RESPOND WITH ONLY the narrative text. No labels, no JSON, no headers, no preamble.
 `;
-    }
+  }
