@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Globe, ShieldAlert, Heart, ArrowRight, Loader2, Sparkles,
   Copy, RefreshCw, CheckCircle2, ClipboardList,
-  AlertCircle, FileText, LogIn, LogOut, Lock, Shield, Trash2
+  AlertCircle, FileText, LogIn, LogOut, Lock, Shield, Trash2, XCircle
 } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
@@ -58,7 +58,6 @@ const LOADING_MESSAGES: Record<UILanguage, string[]> = {
     'تقریباً تیار...',
   ],
 };
-
 // ─── Fake progress hook ───────────────────────────────────────────────────────
 function useFakeProgress(active: boolean): number {
   const [progress, setProgress] = useState(0);
@@ -149,8 +148,7 @@ function StreamCursor() {
       className="inline-block w-0.5 h-5 bg-[#7D9168] ml-0.5 align-middle"
     />
   );
-}
-
+                                }
 // ═════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [uiLanguage, setUiLanguage] = useState<UILanguage>('EN');
@@ -185,6 +183,9 @@ export default function App() {
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [showLangDropdown, setShowLangDropdown] = useState(false);
 
+  // جديد: حالة الخطأ لعرضها للمستخدم
+  const [apiError, setApiError] = useState<string | null>(null);
+
   const resultsRef = useRef<HTMLDivElement>(null);
   const t = TRANSLATIONS[uiLanguage];
   const isRTL = RTL_LANGUAGES.includes(uiLanguage);
@@ -214,7 +215,10 @@ export default function App() {
   const handleBack = () => {
     if (screen === 'INTAKE') setScreen('WELCOME');
     else if (screen === 'DEMOGRAPHICS') setScreen('INTAKE');
-    else if (screen === 'MEDICAL_HISTORY') setScreen('DEMOGRAPHICS');
+    else if (screen === 'MEDICAL_HISTORY') {
+      setScreen('DEMOGRAPHICS');
+      setApiError(null); // مسح الخطأ عند العودة
+    }
     else if (screen === 'ANALYSIS') {
       if (isOutputLangStep) {
         setIsOutputLangStep(false);
@@ -227,14 +231,15 @@ export default function App() {
       } else {
         setScreen('MEDICAL_HISTORY');
         setAnalysisResult(null);
+        setApiError(null); // مسح الخطأ
       }
     }
   };
-
-  // ─── Initial structured call ───────────────────────────────────────────────
+    // ─── Initial structured call ───────────────────────────────────────────────
   const handleIntakeSubmit = async () => {
     if (!userData.intakeText.trim()) return;
     setIsAnalyzing(true);
+    setApiError(null); // مسح أي خطأ سابق
     setScreen('ANALYSIS');
     try {
       const result = await analyzeStructured(
@@ -247,6 +252,8 @@ export default function App() {
       setIsOutputLangStep(false);
     } catch (err) {
       console.error(err);
+      const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+      setApiError(errorMsg);
       setScreen('MEDICAL_HISTORY');
     } finally {
       setIsAnalyzing(false);
@@ -274,9 +281,17 @@ export default function App() {
   const handleFinalAnalysis = async () => {
     if (!analysisResult) return;
     setIsAnalyzing(true);
+    setApiError(null);
     try {
+      // استخدام أحدث userData.interviewAnswers (التي تم تحديثها للتو في handleNextStep)
       const finalResult = await analyzeStructured(
-        { intakeText: userData.intakeText, age: userData.age, interviewAnswers: userData.interviewAnswers, seenDoctorBefore: userData.seenDoctorBefore, doctorFindings: userData.doctorFindings },
+        { 
+          intakeText: userData.intakeText, 
+          age: userData.age, 
+          interviewAnswers: userData.interviewAnswers, 
+          seenDoctorBefore: userData.seenDoctorBefore, 
+          doctorFindings: userData.doctorFindings 
+        },
         uiLanguage, outputLanguage
       );
       setAnalysisResult(finalResult);
@@ -286,20 +301,32 @@ export default function App() {
 
       setIsStreaming(true);
       streamNarrative(
-        { intakeText: userData.intakeText, age: userData.age, interviewAnswers: userData.interviewAnswers, seenDoctorBefore: userData.seenDoctorBefore, doctorFindings: userData.doctorFindings },
+        { 
+          intakeText: userData.intakeText, 
+          age: userData.age, 
+          interviewAnswers: userData.interviewAnswers, 
+          seenDoctorBefore: userData.seenDoctorBefore, 
+          doctorFindings: userData.doctorFindings 
+        },
         outputLanguage,
         chunk => setStreamedNarrative(prev => prev + chunk),
         fullText => {
           setAnalysisResult(prev => prev ? { ...prev, clinicalReport: { ...prev.clinicalReport, narrative: fullText } } : prev);
           setIsStreaming(false);
         },
-        err => { console.error(err); setIsStreaming(false); }
+        err => { 
+          console.error(err); 
+          setApiError(err instanceof Error ? err.message : 'Streaming error');
+          setIsStreaming(false); 
+        }
       ).catch(err => {
         console.error('streamNarrative unhandled error:', err);
+        setApiError(err instanceof Error ? err.message : 'Streaming error');
         setIsStreaming(false);
       });
     } catch (err) {
       console.error(err);
+      setApiError(err instanceof Error ? err.message : 'Analysis error');
       setIsAnalyzing(false);
     }
   };
@@ -505,6 +532,19 @@ export default function App() {
                 <ClipboardList className="w-10 h-10 text-[#7D9168]" />
               </div>
               <h1 className="text-2xl font-bold mb-8">{t.medical.title}</h1>
+              
+              {/* عرض رسالة الخطأ إذا وجدت */}
+              {apiError && (
+                <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
+                  className="mb-4 p-3 bg-red-50 border border-red-300 rounded-xl flex items-start gap-2 text-red-700">
+                  <XCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                  <div className="text-sm font-medium text-left">
+                    <p className="font-bold mb-1">Analysis failed</p>
+                    <p className="text-xs opacity-90">{apiError}</p>
+                  </div>
+                </motion.div>
+              )}
+
               <p className="text-[#617250] mb-6 font-medium">{t.medical.doctorQuestion}</p>
               <div className="flex gap-4 mb-6">
                 {[
@@ -529,7 +569,7 @@ export default function App() {
                 </motion.div>
               )}
               <div className="flex gap-4">
-                <button onClick={() => setScreen('DEMOGRAPHICS')} className="flex-1 py-5 bg-white border-2 border-[#E9EFE5] rounded-2xl font-bold hover:bg-[#F3F4F6]">{t.analysis.back}</button>
+                <button onClick={handleBack} className="flex-1 py-5 bg-white border-2 border-[#E9EFE5] rounded-2xl font-bold hover:bg-[#F3F4F6]">{t.analysis.back}</button>
                 <button onClick={handleIntakeSubmit}
                   className="flex-[2] py-5 bg-[#CF7E7E] text-white rounded-2xl font-bold hover:bg-[#B85F5F] flex items-center justify-center gap-3 shadow-lg shadow-[#F7DADA]">
                   {t.medical.button}<ArrowRight className={cn("w-5 h-5", isRTL && "rotate-180")} />
@@ -808,4 +848,4 @@ export default function App() {
       </main>
     </div>
   );
-}
+      }
