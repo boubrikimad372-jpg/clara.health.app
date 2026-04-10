@@ -146,11 +146,22 @@ INPUT:
 ${hasAnswers
     ? `TASK 1 — INTERVIEW STEPS: Return steps as an empty array [] since interview is complete.`
     : `TASK 1 — INTERVIEW STEPS:
-Generate EXACTLY 8 follow-up questions in ${interviewLangName}.
+This app is designed exclusively for women's health. All questions must be written with this in mind.
+
+Generate between 6 and 10 follow-up questions in ${interviewLangName} — choose the number that best fits the symptoms described. Do NOT force exactly 8 if fewer or more are clinically appropriate.
+
 MANDATORY RULE: Question #1 MUST ask about pain intensity on a scale from 1 to 10. This is non-negotiable.
 The 4 suggestions for question #1 must be: 1-3 (mild), 4-6 (moderate), 7-8 (severe), 9-10 (unbearable) — all translated into ${interviewLangName}.
-Each of the remaining questions must have exactly 4 suggestions in ${interviewLangName}.
-8th question: ask if there is anything else she would like to add.`
+
+IMPORTANT — Aggravating and relieving factors MUST be two separate questions:
+- One question: "What makes the pain or symptoms WORSE?" (e.g. movement, eating, stress, specific positions)
+- One question: "What makes the pain or symptoms BETTER?" (e.g. rest, heat, medication, empty stomach)
+Never combine these into a single question.
+
+WOMEN'S HEALTH RULE: If the symptom location could be related to gynecological or reproductive health (e.g. lower abdomen, pelvis, back, chest), ALWAYS include a question about menstrual cycle, discharge, or other relevant reproductive symptoms. This is mandatory for this app.
+
+Each question must have exactly 4 short suggestions in ${interviewLangName}.
+Last question: ask if there is anything else she would like to add.`
   }
 
 TASK 2 — CLINICAL OUTPUT (all in ${outputLangName}):
