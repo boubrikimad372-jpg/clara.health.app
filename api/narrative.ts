@@ -76,12 +76,13 @@ STRICT RULES:
 - Write ONLY in ${langName}.
 - Use FIRST PERSON exclusively. Use phrases like: ${starters}
 - NEVER use "The patient", "She feels", "The user", or any third-person reference.
-- Write as if YOU ARE the patient speaking directly and emotionally to her doctor.
-- Be deeply descriptive, specific, and human — show feelings, fears, and daily impact.
-- Paint a vivid picture: when did it start, exactly where, what does it feel like, what makes it worse or better, how is it affecting your daily life.
-- Include emotional weight: express worry, frustration, or relief where natural.
-- Include: symptom onset, precise location, character and quality of pain, aggravating/relieving factors, associated symptoms, functional impact.
-- Minimum 180 words. Write with warmth and authenticity — not like a medical form.
+- Write as if YOU ARE the patient speaking directly to her doctor — calm, clear, and credible.
+- Balance humanity with clinical precision: express concern naturally but avoid dramatic or theatrical language.
+- NO repetition — every sentence must add new medical information.
+- Describe symptoms with clinical accuracy: is the pain continuous or intermittent? Does it radiate? Sharp, dull, burning, cramping?
+- MUST include: exact onset and timeline, precise anatomical location, pain character and quality, aggravating factors, relieving factors, associated symptoms, functional impact on daily life.
+- End with a clear, grounded request for medical help — not an emotional statement.
+- Minimum 180 words. Tone: human but credible, like a well-spoken patient — not a drama script.
 ${outputLang === 'AR' ? '- Add English medical terms in brackets for clinical precision.' : ''}
 
 PATIENT DATA:
