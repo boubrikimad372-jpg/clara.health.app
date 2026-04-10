@@ -146,27 +146,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
     const prompt = buildNarrativePrompt(userData, outLang);
 
-    const streamResult = await model.generateContentStream({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    });
+    // Try streaming with gemini-2.5-flash first, fall back to non-streaming if it fails
+    let narrativeText = '';
 
-    for await (const chunk of streamResult.stream) {
-      if (clientDisconnected || res.writableEnded) {
-        console.log('Client disconnected — stopping stream');
-        break;
+    try {
+      const streamModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+      const streamResult = await streamModel.generateContentStream({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      });
+
+      for await (const chunk of streamResult.stream) {
+        if (clientDisconnected || res.writableEnded) {
+          console.log('Client disconnected — stopping stream');
+          break;
+        }
+        const text = chunk.text();
+        if (text) {
+          narrativeText += text;
+          res.write(text);
+        }
       }
-      const text = chunk.text();
-      if (text) res.write(text);
+    } catch (streamErr: unknown) {
+      // Streaming failed — fall back to non-streaming with lite model
+      console.warn('Streaming failed, falling back to non-streaming:', streamErr);
+      narrativeText = '';
+
+      const liteModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
+      const result = await liteModel.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      });
+      narrativeText = result.response.text();
+      if (!res.writableEnded && narrativeText) {
+        res.write(narrativeText);
+      }
     }
 
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('narrative stream error:', message);
+    console.error('narrative error:', message);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Stream failed. Please try again.' });
+      res.status(500).json({ error: 'Narrative generation failed. Please try again.' });
       return;
     }
   } finally {
