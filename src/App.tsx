@@ -365,18 +365,62 @@ export default function App() {
     try {
       const original = resultsRef.current;
       const clone = original.cloneNode(true) as HTMLElement;
-      clone.style.cssText = `position:absolute;left:-9999px;top:0;width:${original.offsetWidth}px;background:#fff;color:#000;`;
+
+      // ── Fix RTL: force LTR layout for PDF so text doesn't appear reversed ──
+      clone.style.cssText = `position:absolute;left:-9999px;top:0;width:${original.offsetWidth}px;background:#fff;color:#000;direction:ltr;`;
       clone.querySelectorAll<HTMLElement>('*').forEach(el => {
-        el.style.color = '#000'; el.style.borderColor = '#000'; el.style.fill = '#000';
+        el.style.color = '#000';
+        el.style.borderColor = '#000';
+        el.style.fill = '#000';
+        // Fix punctuation mirroring on RTL elements
+        const computedDir = window.getComputedStyle(el).direction;
+        if (computedDir === 'rtl') {
+          el.style.direction = 'rtl'; // keep RTL for Arabic text itself
+          el.style.unicodeBidi = 'embed';
+        }
         const bg = window.getComputedStyle(el).backgroundColor;
         if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)') el.style.backgroundColor = '#fff';
       });
+
+      // ── Remove doctor questions section from PDF only if user is NOT logged in ─
+      // If logged in, questions are visible and should appear in the PDF.
+      if (!currentUser) {
+        clone.querySelectorAll<HTMLElement>('h2, h3').forEach(heading => {
+          const text = heading.textContent?.trim() ?? '';
+          if (
+            text.includes('PHYSICIAN') ||
+            text.includes('قائمة مراجعة') ||
+            text.includes('चिकित्सक') ||
+            text.includes('معالج')
+          ) {
+            const section = heading.closest('div') ?? heading.parentElement;
+            if (section) section.remove();
+          }
+        });
+      }
+
       document.body.appendChild(clone);
-      const canvas = await html2canvas(clone, { scale: 2, backgroundColor: '#fff', useCORS: true, logging: false });
+      const canvas = await html2canvas(clone, {
+        scale: 2,
+        backgroundColor: '#fff',
+        useCORS: true,
+        logging: false,
+        // Ensure proper text rendering for mixed LTR/RTL content
+        foreignObjectRendering: false,
+      });
       document.body.removeChild(clone);
+
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'px', format: [canvas.width / 2, canvas.height / 2] });
-      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, pdf.internal.pageSize.getWidth(), (canvas.height / canvas.width) * pdf.internal.pageSize.getWidth());
+      pdf.addImage(
+        canvas.toDataURL('image/png'),
+        'PNG',
+        0,
+        0,
+        pdf.internal.pageSize.getWidth(),
+        (canvas.height / canvas.width) * pdf.internal.pageSize.getWidth()
+      );
       pdf.save('Clara_Medical_Report.pdf');
+
       if (autoDelete) {
         setUserData({ intakeText: '', age: '', seenDoctorBefore: false, doctorFindings: '', interviewAnswers: {} });
         setAnalysisResult(null); setStreamedNarrative(''); setDataDeleted(true);
@@ -772,7 +816,7 @@ export default function App() {
                   <h2 className="text-xl font-black uppercase border-b-2 border-black mb-4 pb-1">
                     {uiLanguage === 'AR' ? 'السجل السريري المفصل' : 'Detailed Clinical Record'}
                   </h2>
-                  <div className="border-2 border-black p-6 text-lg font-bold leading-relaxed bg-[#F9FAF9] min-h-[100px]">
+                  <div className="border-2 border-black p-6 text-lg font-bold leading-relaxed bg-[#F9FAF9] min-h-[100px]" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                     {isStreaming ? (
                       <>
                         <p className="text-xs font-bold text-[#9CAF88] mb-3 uppercase tracking-widest flex items-center gap-2">
