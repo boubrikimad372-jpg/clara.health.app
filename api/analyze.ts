@@ -1,194 +1,142 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
+import Groq from 'groq-sdk';
+import {
+  getApiKey,
+  validateUserData,
+  validateLanguage,
+  buildStructuredPrompt,
+  type OutputLanguage,
+  type AnalyzeRequestBody,
+} from './_shared.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type OutputLanguage = 'EN' | 'AR' | 'HI' | 'UR';
-
-interface UserData {
-  intakeText: string;
-  age?: string;
-  seenDoctorBefore: boolean;
-  doctorFindings?: string;
-  interviewAnswers?: Record<string, string>;
+interface InterviewStep {
+  category: string;
+  question: string;
+  suggestions: string[];
 }
 
-interface AnalyzeRequestBody {
-  userData: UserData;
-  uiLanguage?: OutputLanguage;
-  outputLanguage?: OutputLanguage;
+interface AnalysisResult {
+  steps: InterviewStep[];
+  guidance: {
+    tips: string[];
+    potentialConditions: { name: string; explanation: string }[];
+    urgency: 'Green' | 'Yellow' | 'Red';
+  };
+  clinicalReport: {
+    narrative: string;
+    summaryTable: { label: string; value: string }[];
+    doctorQuestions: string[];
+  };
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Validation ───────────────────────────────────────────────────────────────
 
-const OUTPUT_LANG_NAMES: Record<OutputLanguage, string> = {
-  EN: 'English',
-  AR: 'Arabic',
-  HI: 'Hindi',
-  UR: 'Urdu',
-};
+function isStringArray(val: unknown): val is string[] {
+  return Array.isArray(val) && val.every((x) => typeof x === 'string');
+}
 
-const VALID_LANGUAGES: OutputLanguage[] = ['EN', 'AR', 'HI', 'UR'];
+function validateAnalysisResult(data: unknown): data is AnalysisResult {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Record<string, unknown>;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function getApiKey(): string {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key || key.trim() === '') {
-    throw new Error('GEMINI_API_KEY is not configured in Vercel Environment Variables.');
+  if (!Array.isArray(d.steps)) return false;
+  for (const step of d.steps) {
+    if (typeof step !== 'object' || step === null) return false;
+    const s = step as Record<string, unknown>;
+    if (typeof s.category !== 'string') return false;
+    if (typeof s.question !== 'string') return false;
+    if (!isStringArray(s.suggestions) || s.suggestions.length === 0) return false;
   }
-  return key.trim();
-}
 
-function validateUserData(userData: unknown): userData is UserData {
-  if (!userData || typeof userData !== 'object') return false;
-  const u = userData as Record<string, unknown>;
-  if (typeof u.intakeText !== 'string' || u.intakeText.trim() === '') return false;
-  if (typeof u.seenDoctorBefore !== 'boolean') return false;
-  if (u.age !== undefined && typeof u.age !== 'string') return false;
-  if (u.doctorFindings !== undefined && typeof u.doctorFindings !== 'string') return false;
-  if (u.interviewAnswers !== undefined && typeof u.interviewAnswers !== 'object') return false;
+  if (!d.guidance || typeof d.guidance !== 'object') return false;
+  const g = d.guidance as Record<string, unknown>;
+  if (!isStringArray(g.tips) || g.tips.length === 0) return false;
+  if (!Array.isArray(g.potentialConditions) || g.potentialConditions.length === 0) return false;
+  for (const pc of g.potentialConditions) {
+    if (typeof pc !== 'object' || pc === null) return false;
+    const p = pc as Record<string, unknown>;
+    if (typeof p.name !== 'string' || typeof p.explanation !== 'string') return false;
+  }
+  if (!['Green', 'Yellow', 'Red'].includes(g.urgency as string)) return false;
+
+  if (!d.clinicalReport || typeof d.clinicalReport !== 'object') return false;
+  const cr = d.clinicalReport as Record<string, unknown>;
+  if (typeof cr.narrative !== 'string') return false;
+  if (!Array.isArray(cr.summaryTable) || cr.summaryTable.length === 0) return false;
+  for (const row of cr.summaryTable) {
+    if (typeof row !== 'object' || row === null) return false;
+    const r = row as Record<string, unknown>;
+    if (typeof r.label !== 'string' || typeof r.value !== 'string') return false;
+  }
+  if (!isStringArray(cr.doctorQuestions) || cr.doctorQuestions.length === 0) return false;
+
   return true;
 }
 
-function validateLanguage(lang: unknown): lang is OutputLanguage {
-  return typeof lang === 'string' && VALID_LANGUAGES.includes(lang as OutputLanguage);
+// ─── Strip markdown code fences ───────────────────────────────────────────────
+
+function stripCodeFences(text: string): string {
+  return text
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
 }
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
+// ─── Models (ordered by priority) ────────────────────────────────────────────
+// llama-3.1-8b-instant    → 14,400 RPD (primary:  saves the 70B quota for narrative)
+// llama-3.3-70b-versatile →  1,000 RPD (fallback: better reasoning for complex JSON)
 
-const ANALYSIS_SCHEMA = {
-  type: SchemaType.OBJECT,
-  properties: {
-    steps: {
-      type: SchemaType.ARRAY,
-      items: {
-        type: SchemaType.OBJECT,
-        properties: {
-          category: { type: SchemaType.STRING },
-          question: { type: SchemaType.STRING },
-          suggestions: {
-            type: SchemaType.ARRAY,
-            items: { type: SchemaType.STRING },
-            description: 'Exactly 4 quick reply options.',
-          },
-        },
-        required: ['category', 'question', 'suggestions'],
+const MODELS = ['llama-3.1-8b-instant', 'llama-3.3-70b-versatile'] as const;
+
+const MAX_RETRIES = 3;   // attempts per model before switching
+const RETRY_DELAY_MS = 500; // base delay between retries (multiplied by attempt)
+
+// ─── Sleep helper ─────────────────────────────────────────────────────────────
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// ─── Single call attempt ──────────────────────────────────────────────────────
+
+async function callGroq(
+  groq: Groq,
+  prompt: string,
+  model: string,
+  attempt: number
+): Promise<AnalysisResult> {
+  console.log(`[analyze] model=${model} attempt=${attempt}`);
+
+  const completion = await groq.chat.completions.create({
+    model,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'You are a clinical triage assistant. You MUST respond with ONLY a valid JSON object that exactly matches the requested structure. No markdown, no code fences, no explanation.',
       },
-    },
-    guidance: {
-      type: SchemaType.OBJECT,
-      properties: {
-        tips: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
-        potentialConditions: {
-          type: SchemaType.ARRAY,
-          items: {
-            type: SchemaType.OBJECT,
-            properties: {
-              name: { type: SchemaType.STRING },
-              explanation: { type: SchemaType.STRING },
-            },
-            required: ['name', 'explanation'],
-          },
-        },
-        urgency: { type: SchemaType.STRING, enum: ['Green', 'Yellow', 'Red'] },
-      },
-      required: ['tips', 'potentialConditions', 'urgency'],
-    },
-    clinicalReport: {
-      type: SchemaType.OBJECT,
-      properties: {
-        narrative: { type: SchemaType.STRING },
-        summaryTable: {
-          type: SchemaType.ARRAY,
-          items: {
-            type: SchemaType.OBJECT,
-            properties: {
-              label: { type: SchemaType.STRING },
-              value: { type: SchemaType.STRING },
-            },
-            required: ['label', 'value'],
-          },
-        },
-        doctorQuestions: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
-      },
-      required: ['narrative', 'summaryTable', 'doctorQuestions'],
-    },
-  },
-  required: ['steps', 'guidance', 'clinicalReport'],
-};
+      { role: 'user', content: prompt },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.2,
+    max_tokens: 4096,
+  });
 
-// ─── Prompt ───────────────────────────────────────────────────────────────────
+  const rawText = completion.choices[0]?.message?.content ?? '';
+  const cleanedText = stripCodeFences(rawText);
 
-function buildStructuredPrompt(userData: UserData, uiLang: OutputLanguage, outputLang: OutputLanguage): string {
-  const outputLangName = OUTPUT_LANG_NAMES[outputLang];
-  const interviewLangName = OUTPUT_LANG_NAMES[uiLang];
-  const hasAnswers = userData.interviewAnswers && Object.keys(userData.interviewAnswers).length > 0;
-
-  return `
-ROLE: Clara — Clinical Triage Expert.
-MISSION: Transform patient symptoms into a respectful 2-frame clinical report.
-
-LANGUAGE DIRECTIVE:
-- Interview questions (steps): ${interviewLangName}.
-- Final clinical report (guidance + clinicalReport): ${outputLangName}.
-- Accept any dialect or informal language as input — understand it fully.
-- If outputLanguage is Arabic, include English medical terms in brackets.
-
-INPUT:
-- Age: ${userData.age || 'Not provided'}
-- Description: "${userData.intakeText}"
-- Medical history: ${userData.seenDoctorBefore
-    ? `Has seen doctor. Findings: "${userData.doctorFindings || 'None'}"`
-    : 'No prior doctor visit.'}
-- Interview answers: ${JSON.stringify(userData.interviewAnswers || {})}
-
-${hasAnswers
-    ? `TASK 1 — INTERVIEW STEPS: Return steps as an empty array [] since interview is complete.`
-    : `TASK 1 — INTERVIEW STEPS:
-This app is designed exclusively for women's health. All questions must be written with this in mind.
-
-Generate between 6 and 10 follow-up questions in ${interviewLangName} — choose the number that best fits the symptoms described. Do NOT force exactly 8 if fewer or more are clinically appropriate.
-
-MANDATORY RULE: Question #1 MUST ask about pain intensity on a scale from 1 to 10. This is non-negotiable.
-The 4 suggestions for question #1 must be: 1-3 (mild), 4-6 (moderate), 7-8 (severe), 9-10 (unbearable) — all translated into ${interviewLangName}.
-
-IMPORTANT — Aggravating and relieving factors MUST always be two completely separate questions:
-- One question asks ONLY: what makes the pain or symptoms WORSE? (movement, eating, stress, position, etc.)
-- One question asks ONLY: what makes the pain or symptoms BETTER? (rest, heat, medication, empty stomach, etc.)
-Never combine them into one question.
-
-SENSITIVE CONDITIONS RULE:
-This app is designed exclusively for women. Always include one question that asks whether the symptoms could be related to a sensitive or personal condition. The 4 suggestions must be chosen from the most clinically relevant options for the specific symptom described. Examples of options to choose from:
-- Menstrual cycle (before / during / after period)
-- Pregnancy or suspected pregnancy
-- Urinary tract infection
-- Digestive or bowel issue
-- Skin or hormonal condition
-- Emotional or psychological stress
-- Sexual health or intimacy-related
-- None of the above
-Select the 4 most relevant options based on the symptom. Do NOT always use the same 4 — adapt them to the clinical context.
-
-Each question must have exactly 4 short suggestions in ${interviewLangName}.
-Last question: ask if there is anything else she would like to add.`
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleanedText);
+  } catch {
+    throw new Error(`JSON parse failed: ${cleanedText.slice(0, 200)}`);
   }
 
-TASK 2 — CLINICAL OUTPUT (all in ${outputLangName}):
+  if (!validateAnalysisResult(parsed)) {
+    throw new Error('Structure validation failed — JSON shape does not match expected schema');
+  }
 
-FRAME 1 — GUIDANCE:
-- tips: 4 actionable, empathetic tips.
-- potentialConditions: 2-3 medical possibilities with simple explanations.
-- urgency: Green (Routine) / Yellow (See doctor soon) / Red (Emergency).
-
-FRAME 2 — CLINICAL RECORD:
-- narrative: Write exactly ONE sentence as a placeholder only (e.g. "I will describe my symptoms to my doctor."). The full narrative is generated by a separate call.
-- summaryTable: ALWAYS use ${outputLangName} for ALL labels. NEVER use English labels when output language is not English.
-  Provide exactly 4 rows: Age (value: "${userData.age || 'N/A'}"), Pain Scale (from answers or "—"), Location (from symptoms), Duration (from symptoms or "—").
-- doctorQuestions: 4 first-person questions to ask the doctor.
-
-CRITICAL: narrative must be a 1-sentence placeholder. summaryTable labels MUST be in ${outputLangName} — this is mandatory.
-`;
+  return parsed;
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -207,7 +155,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'API key error';
     console.error('API key error:', message);
-    return res.status(500).json({ error: 'Server configuration error: GEMINI_API_KEY is missing' });
+    return res
+      .status(500)
+      .json({ error: 'Server configuration error: GROQ_API_KEY is missing' });
   }
 
   const body = req.body as AnalyzeRequestBody;
@@ -215,40 +165,48 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (!validateUserData(userData)) {
     return res.status(400).json({
-      error: 'Invalid request: userData must include a non-empty intakeText and seenDoctorBefore (boolean)',
+      error:
+        'Invalid request: userData must include a non-empty intakeText and seenDoctorBefore (boolean)',
     });
   }
 
   const uiLang: OutputLanguage = validateLanguage(uiLanguage) ? uiLanguage : 'EN';
   const outLang: OutputLanguage = validateLanguage(outputLanguage) ? outputLanguage : 'EN';
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash-lite',
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: ANALYSIS_SCHEMA as any,
-      },
-    });
+  const groq = new Groq({ apiKey });
+  const prompt = buildStructuredPrompt(userData, uiLang, outLang);
+  const errors: string[] = [];
 
-    const prompt = buildStructuredPrompt(userData, uiLang, outLang);
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+  // ── Retry loop: try each model up to MAX_RETRIES times ───────────────────
+  for (const model of MODELS) {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const result = await callGroq(groq, prompt, model, attempt);
+        console.log(`[analyze] success — model=${model} attempt=${attempt}`);
+        return res.status(200).json(result);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        errors.push(`[${model}] attempt ${attempt}: ${message}`);
+        console.warn(`[analyze] failed — ${errors[errors.length - 1]}`);
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      console.error('Failed to parse Gemini response as JSON:', text);
-      return res.status(500).json({ error: 'AI returned an invalid response. Please try again.' });
+        // Rate limit → skip remaining attempts for this model
+        if (message.includes('429') || message.toLowerCase().includes('rate limit')) {
+          console.warn(`[analyze] rate limit hit on ${model}, switching model`);
+          break;
+        }
+
+        // Exponential backoff before next retry (skip on final attempt)
+        const isLast = model === MODELS[MODELS.length - 1] && attempt === MAX_RETRIES;
+        if (!isLast) {
+          await sleep(RETRY_DELAY_MS * attempt);
+        }
+      }
     }
-
-    return res.status(200).json(parsed);
-
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('Analyze handler error:', message);
-    return res.status(500).json({ error: `Analysis failed: ${message}` });
   }
+
+  // All models and retries exhausted
+  console.error('[analyze] all retries exhausted:', errors.join(' | '));
+  return res.status(500).json({
+    error: 'Analysis failed after multiple attempts. Please try again in a moment.',
+  });
 }

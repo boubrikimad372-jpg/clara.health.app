@@ -1,6 +1,3 @@
-// shared.ts
-import { SchemaType } from '@google/generative-ai';
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type OutputLanguage = 'EN' | 'AR' | 'HI' | 'UR';
@@ -45,9 +42,11 @@ export const VALID_LANGUAGES: OutputLanguage[] = ['EN', 'AR', 'HI', 'UR'];
 // ─── API Key validation ───────────────────────────────────────────────────────
 
 export function getApiKey(): string {
-  const key = process.env.GEMINI_API_KEY;
+  const key = process.env.GROQ_API_KEY;
   if (!key || key.trim() === '') {
-    throw new Error('GEMINI_API_KEY is not configured. Add it in Vercel Dashboard → Settings → Environment Variables (no VITE_ prefix), then redeploy.');
+    throw new Error(
+      'GROQ_API_KEY is not configured. Add it in Vercel Dashboard → Settings → Environment Variables (no VITE_ prefix), then redeploy.'
+    );
   }
   return key.trim();
 }
@@ -69,70 +68,39 @@ export function validateLanguage(lang: unknown): lang is OutputLanguage {
   return typeof lang === 'string' && VALID_LANGUAGES.includes(lang as OutputLanguage);
 }
 
-// ─── Schema ───────────────────────────────────────────────────────────────────
+// ─── JSON Schema (as plain string for Groq prompt) ───────────────────────────
+// Groq does not support responseSchema like Gemini.
+// Instead we embed the expected JSON structure directly in the prompt.
 
-export const ANALYSIS_SCHEMA = {
-  type: SchemaType.OBJECT,
-  properties: {
-    steps: {
-      type: SchemaType.ARRAY,
-      items: {
-        type: SchemaType.OBJECT,
-        properties: {
-          category: { type: SchemaType.STRING },
-          question: { type: SchemaType.STRING },
-          suggestions: {
-            type: SchemaType.ARRAY,
-            items: { type: SchemaType.STRING },
-            description: 'Exactly 4 quick reply options.',
-          },
-        },
-        required: ['category', 'question', 'suggestions'],
-      },
-    },
-    guidance: {
-      type: SchemaType.OBJECT,
-      properties: {
-        tips: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
-        potentialConditions: {
-          type: SchemaType.ARRAY,
-          items: {
-            type: SchemaType.OBJECT,
-            properties: {
-              name: { type: SchemaType.STRING },
-              explanation: { type: SchemaType.STRING },
-            },
-            required: ['name', 'explanation'],
-          },
-        },
-        urgency: { type: SchemaType.STRING, enum: ['Green', 'Yellow', 'Red'] },
-      },
-      required: ['tips', 'potentialConditions', 'urgency'],
-    },
-    clinicalReport: {
-      type: SchemaType.OBJECT,
-      properties: {
-        narrative: { type: SchemaType.STRING },
-        summaryTable: {
-          type: SchemaType.ARRAY,
-          items: {
-            type: SchemaType.OBJECT,
-            properties: {
-              label: { type: SchemaType.STRING },
-              value: { type: SchemaType.STRING },
-            },
-            required: ['label', 'value'],
-          },
-        },
-        doctorQuestions: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
-      },
-      required: ['narrative', 'summaryTable', 'doctorQuestions'],
-    },
+export const ANALYSIS_SCHEMA_DESCRIPTION = `
+{
+  "steps": [
+    {
+      "category": "string",
+      "question": "string",
+      "suggestions": ["string", "string", "string", "string"]  // exactly 4
+    }
+    // ... 6-10 items, or empty array [] if interview is complete
+  ],
+  "guidance": {
+    "tips": ["string", "string", "string", "string"],           // exactly 4
+    "potentialConditions": [
+      { "name": "string", "explanation": "string" }
+      // 2-3 items
+    ],
+    "urgency": "Green" | "Yellow" | "Red"
   },
-  required: ['steps', 'guidance', 'clinicalReport'],
-};
+  "clinicalReport": {
+    "narrative": "string",   // ONE sentence placeholder only
+    "summaryTable": [
+      { "label": "string", "value": "string" }
+      // exactly 4 rows: Age, Pain Scale, Location, Duration
+    ],
+    "doctorQuestions": ["string", "string", "string", "string"] // exactly 4
+  }
+}`;
 
-// ─── Prompt builder ───────────────────────────────────────────────────────────
+// ─── Prompt builders ──────────────────────────────────────────────────────────
 
 export function buildStructuredPrompt(
   userData: UserData,
@@ -141,11 +109,17 @@ export function buildStructuredPrompt(
 ): string {
   const outputLangName = OUTPUT_LANG_NAMES[outputLang];
   const interviewLangName = OUTPUT_LANG_NAMES[uiLang];
-  const hasAnswers = userData.interviewAnswers && Object.keys(userData.interviewAnswers).length > 0;
+  const hasAnswers =
+    userData.interviewAnswers && Object.keys(userData.interviewAnswers).length > 0;
 
   return `
 ROLE: Clara — Clinical Triage Expert.
 MISSION: Transform patient symptoms into a respectful 2-frame clinical report.
+
+CRITICAL OUTPUT RULE:
+- You MUST respond with ONLY a valid JSON object. No markdown, no code fences, no explanation.
+- The JSON must exactly match this structure:
+${ANALYSIS_SCHEMA_DESCRIPTION}
 
 LANGUAGE DIRECTIVE:
 - Interview questions (steps): ${interviewLangName}.
@@ -156,32 +130,59 @@ LANGUAGE DIRECTIVE:
 INPUT:
 - Age: ${userData.age || 'Not provided'}
 - Description: "${userData.intakeText}"
-- Medical history: ${userData.seenDoctorBefore
-    ? `Has seen doctor. Findings: "${userData.doctorFindings || 'None'}"`
-    : 'No prior doctor visit.'}
+- Medical history: ${
+    userData.seenDoctorBefore
+      ? `Has seen doctor. Findings: "${userData.doctorFindings || 'None'}"`
+      : 'No prior doctor visit.'
+  }
 - Interview answers: ${JSON.stringify(userData.interviewAnswers || {})}
 
-${hasAnswers
+${
+  hasAnswers
     ? `TASK 1 — INTERVIEW STEPS: Return steps as an empty array [] since interview is complete.`
     : `TASK 1 — INTERVIEW STEPS:
-Generate EXACTLY 8 follow-up questions in ${interviewLangName}.
-Each must have exactly 4 suggestions in the same language.
-8th question: ask if there is anything else she would like to add.`
-  }
+This app is designed exclusively for women's health. All questions must be written with this in mind.
+
+Generate between 6 and 10 follow-up questions in ${interviewLangName} — choose the number that best fits the symptoms described. Do NOT force exactly 8 if fewer or more are clinically appropriate.
+
+MANDATORY RULE: Question #1 MUST ask about pain intensity on a scale from 1 to 10. This is non-negotiable.
+The 4 suggestions for question #1 must be: 1-3 (mild), 4-6 (moderate), 7-8 (severe), 9-10 (unbearable) — all translated into ${interviewLangName}.
+
+IMPORTANT — Aggravating and relieving factors MUST always be two completely separate questions:
+- One question asks ONLY: what makes the pain or symptoms WORSE? (movement, eating, stress, position, etc.)
+- One question asks ONLY: what makes the pain or symptoms BETTER? (rest, heat, medication, empty stomach, etc.)
+Never combine them into one question.
+
+SENSITIVE CONDITIONS RULE:
+Always include one question that asks whether the symptoms could be related to a sensitive or personal condition. The 4 suggestions must be chosen from the most clinically relevant options for the specific symptom described. Examples:
+- Menstrual cycle (before / during / after period)
+- Pregnancy or suspected pregnancy
+- Urinary tract infection
+- Digestive or bowel issue
+- Skin or hormonal condition
+- Emotional or psychological stress
+- Sexual health or intimacy-related
+- None of the above
+
+Each question must have exactly 4 short suggestions in ${interviewLangName}.
+Last question: ask if there is anything else she would like to add.`
+}
 
 TASK 2 — CLINICAL OUTPUT (all in ${outputLangName}):
 
 FRAME 1 — GUIDANCE:
 - tips: 4 actionable, empathetic tips.
-- potentialConditions: 2–3 medical possibilities with simple explanations.
+- potentialConditions: 2-3 medical possibilities with simple explanations.
 - urgency: Green (Routine) / Yellow (See doctor soon) / Red (Emergency).
 
 FRAME 2 — CLINICAL RECORD:
 - narrative: Write exactly ONE sentence as a placeholder only (e.g. "I will describe my symptoms to my doctor."). The full narrative is generated by a separate call.
-- summaryTable: Age (MUST BE "${userData.age || 'N/A'}"), Pain Scale, Location, Duration.
+- summaryTable: ALWAYS use ${outputLangName} for ALL labels. NEVER use English labels when output language is not English.
+  Provide exactly 4 rows: Age (value: "${userData.age || 'N/A'}"), Pain Scale (from answers or "—"), Location (from symptoms), Duration (from symptoms or "—").
 - doctorQuestions: 4 first-person questions to ask the doctor.
 
-CRITICAL: narrative must be a 1-sentence placeholder. Nothing more.
+CRITICAL: narrative must be a 1-sentence placeholder. summaryTable labels MUST be in ${outputLangName}.
+RESPOND WITH ONLY the JSON object. No markdown. No code fences. No explanation.
 `;
 }
 
@@ -195,25 +196,32 @@ export function buildNarrativePrompt(
   return `
 You are Clara — a medical communication assistant writing a patient's personal clinical statement.
 
-TASK: Write a detailed first-person clinical narrative (150–200 words) in ${langName}.
+TASK: Write a first-person clinical narrative in ${langName}. Length must match the available symptom data — do NOT pad or inflate to reach a word count.
 
 STRICT RULES:
 - Write ONLY in ${langName}.
 - Use FIRST PERSON exclusively. Use phrases like: ${starters}
 - NEVER use "The patient", "She feels", "The user", or any third-person reference.
-- Write as if YOU ARE the patient speaking directly to her doctor.
-- Be descriptive, specific, and emotionally precise.
-- Include: symptom onset, location, character of pain, aggravating/relieving factors, associated symptoms.
+- Write as if YOU ARE the patient speaking directly to her doctor — calm, factual, and clinically precise.
+- ZERO emotional or dramatic language. No "I'm scared", "terrifying", "concerning to me", or any feeling-based commentary. Only clinical facts.
+- NO repetition — every sentence must add a new, distinct medical fact.
+- NO padding — do not add filler sentences to reach a word count. If data is limited, write less.
+- Describe symptoms with clinical accuracy: is the pain continuous or intermittent? Does it radiate? Sharp, dull, burning, cramping, pressure?
+- MUST include (only if data is available): onset and timeline, anatomical location, pain character, aggravating factors, relieving factors, associated symptoms, functional impact.
+- End with a concise, factual closing sentence requesting medical evaluation.
+- This app is designed specifically for women's health. If the symptom location is relevant to gynecological conditions (e.g. lower abdomen, pelvis), ALWAYS include whether the pain relates to the menstrual cycle, discharge, or reproductive health — even if the patient did not mention it, infer from context or note it as unconfirmed.
 ${outputLang === 'AR' ? '- Add English medical terms in brackets for clinical precision.' : ''}
 
 PATIENT DATA:
 - Age: ${userData.age || 'Not provided'}
 - Initial description: "${userData.intakeText}"
-- Medical history: ${userData.seenDoctorBefore
-    ? `Has seen a doctor. Findings: "${userData.doctorFindings || 'None'}"`
-    : 'No prior doctor visit.'}
+- Medical history: ${
+    userData.seenDoctorBefore
+      ? `Has seen a doctor. Findings: "${userData.doctorFindings || 'None'}"`
+      : 'No prior doctor visit.'
+  }
 - Detailed answers: ${JSON.stringify(userData.interviewAnswers || {})}
 
 RESPOND WITH ONLY the narrative text. No labels, no JSON, no headers, no preamble.
 `;
-  }
+}

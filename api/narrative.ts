@@ -1,106 +1,27 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
+import {
+  getApiKey,
+  validateUserData,
+  validateLanguage,
+  buildNarrativePrompt,
+  type OutputLanguage,
+  type NarrativeRequestBody,
+} from './_shared.js';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Config ───────────────────────────────────────────────────────────────────
 
-type OutputLanguage = 'EN' | 'AR' | 'HI' | 'UR';
+// llama-3.3-70b-versatile → primary: best writing quality for clinical narrative
+// llama-3.1-8b-instant    → fallback: if 70B hits rate limit
+const MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant'] as const;
 
-interface UserData {
-  intakeText: string;
-  age?: string;
-  seenDoctorBefore: boolean;
-  doctorFindings?: string;
-  interviewAnswers?: Record<string, string>;
-}
-
-interface NarrativeRequestBody {
-  userData: UserData;
-  outputLanguage?: OutputLanguage;
-}
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const OUTPUT_LANG_NAMES: Record<OutputLanguage, string> = {
-  EN: 'English',
-  AR: 'Arabic',
-  HI: 'Hindi',
-  UR: 'Urdu',
-};
-
-const FIRST_PERSON_STARTERS: Record<OutputLanguage, string> = {
-  EN: 'I feel / My pain started / I noticed',
-  AR: 'أشعر بـ / بدأ ألمي منذ / لاحظتُ أن',
-  HI: 'मुझे महसूस हो रहा है / मेरा दर्द शुरू हुआ / मैंने देखा',
-  UR: 'مجھے محسوس ہو رہا ہے / میرا درد شروع ہوا / میں نے محسوس کیا',
-};
-
-const VALID_LANGUAGES: OutputLanguage[] = ['EN', 'AR', 'HI', 'UR'];
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function getApiKey(): string {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key || key.trim() === '') {
-    throw new Error('GEMINI_API_KEY is not configured in Vercel Environment Variables.');
-  }
-  return key.trim();
-}
-
-function validateUserData(userData: unknown): userData is UserData {
-  if (!userData || typeof userData !== 'object') return false;
-  const u = userData as Record<string, unknown>;
-  if (typeof u.intakeText !== 'string' || u.intakeText.trim() === '') return false;
-  if (typeof u.seenDoctorBefore !== 'boolean') return false;
-  if (u.age !== undefined && typeof u.age !== 'string') return false;
-  if (u.doctorFindings !== undefined && typeof u.doctorFindings !== 'string') return false;
-  if (u.interviewAnswers !== undefined && typeof u.interviewAnswers !== 'object') return false;
-  return true;
-}
-
-function validateLanguage(lang: unknown): lang is OutputLanguage {
-  return typeof lang === 'string' && VALID_LANGUAGES.includes(lang as OutputLanguage);
-}
-
-// ─── Prompt ───────────────────────────────────────────────────────────────────
-
-function buildNarrativePrompt(userData: UserData, outputLang: OutputLanguage): string {
-  const langName = OUTPUT_LANG_NAMES[outputLang];
-  const starters = FIRST_PERSON_STARTERS[outputLang];
-
-  return `
-You are Clara — a medical communication assistant writing a patient's personal clinical statement.
-
-TASK: Write a first-person clinical narrative in ${langName}. Length must match the available symptom data — do NOT pad or inflate to reach a word count.
-
-STRICT RULES:
-- Write ONLY in ${langName}.
-- Use FIRST PERSON exclusively. Use phrases like: ${starters}
-- NEVER use "The patient", "She feels", "The user", or any third-person reference.
-- Write as if YOU ARE the patient speaking directly to her doctor — calm, factual, and clinically precise.
-- ZERO emotional or dramatic language. No "I'm scared", "terrifying", "concerning to me", or any feeling-based commentary. Only clinical facts.
-- NO repetition — every sentence must add a new, distinct medical fact.
-- NO padding — do not add filler sentences to reach a word count. If data is limited, write less.
-- Describe symptoms with clinical accuracy: is the pain continuous or intermittent? Does it radiate? Sharp, dull, burning, cramping, pressure?
-- MUST include (only if data is available): onset and timeline, anatomical location, pain character, aggravating factors, relieving factors, associated symptoms, functional impact.
-- End with a concise, factual closing sentence requesting medical evaluation.
-- This app is designed specifically for women's health. If the symptom location is relevant to gynecological conditions (e.g. lower abdomen, pelvis), ALWAYS include whether the pain relates to the menstrual cycle, discharge, or reproductive health — even if the patient did not mention it, infer from context or note it as unconfirmed.
-${outputLang === 'AR' ? '- Add English medical terms in brackets for clinical precision.' : ''}
-
-PATIENT DATA:
-- Age: ${userData.age || 'Not provided'}
-- Initial description: "${userData.intakeText}"
-- Medical history: ${userData.seenDoctorBefore
-    ? `Has seen a doctor. Findings: "${userData.doctorFindings || 'None'}"`
-    : 'No prior doctor visit.'}
-- Detailed answers: ${JSON.stringify(userData.interviewAnswers || {})}
-
-RESPOND WITH ONLY the narrative text. No labels, no JSON, no headers, no preamble.
-`;
-}
-
-// ─── Timeout ──────────────────────────────────────────────────────────────────
-
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 500;
 const STREAM_TIMEOUT_MS = 45_000;
+
+// ─── Sleep helper ─────────────────────────────────────────────────────────────
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 
@@ -123,7 +44,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (!validateUserData(userData)) {
     return res.status(400).json({
-      error: 'Invalid request: userData must include a non-empty intakeText and seenDoctorBefore (boolean)',
+      error:
+        'Invalid request: userData must include a non-empty intakeText and seenDoctorBefore (boolean)',
     });
   }
 
@@ -139,59 +61,93 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const timeoutId = setTimeout(() => {
     if (!res.writableEnded) {
-      console.error('narrative stream timed out');
+      console.error('[narrative] stream timed out');
       res.end();
     }
   }, STREAM_TIMEOUT_MS);
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const prompt = buildNarrativePrompt(userData, outLang);
+  const groq = new Groq({ apiKey });
+  const prompt = buildNarrativePrompt(userData, outLang);
+  const errors: string[] = [];
 
-    // Try streaming with gemini-2.5-flash first, fall back to non-streaming if it fails
-    let narrativeText = '';
+  // ── Retry loop: try each model up to MAX_RETRIES times ───────────────────
+  for (const model of MODELS) {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      console.log(`[narrative] model=${model} attempt=${attempt}`);
 
-    try {
-      const streamModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-      const streamResult = await streamModel.generateContentStream({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      });
+      try {
+        // ── Try streaming ──────────────────────────────────────────────────
+        const stream = await groq.chat.completions.create({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          stream: true,
+          temperature: 0.5,
+          max_tokens: 1024,
+        });
 
-      for await (const chunk of streamResult.stream) {
-        if (clientDisconnected || res.writableEnded) {
-          console.log('Client disconnected — stopping stream');
+        let wroteAnything = false;
+
+        for await (const chunk of stream) {
+          if (clientDisconnected || res.writableEnded) {
+            console.log('[narrative] client disconnected — stopping stream');
+            clearTimeout(timeoutId);
+            if (!res.writableEnded) res.end();
+            return;
+          }
+          const text = chunk.choices[0]?.delta?.content ?? '';
+          if (text) {
+            res.write(text);
+            wroteAnything = true;
+          }
+        }
+
+        if (wroteAnything) {
+          console.log(`[narrative] success — model=${model} attempt=${attempt}`);
+          clearTimeout(timeoutId);
+          if (!res.writableEnded) res.end();
+          return;
+        }
+
+        // Stream completed but wrote nothing — treat as failure
+        throw new Error('Stream completed with empty content');
+
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        errors.push(`[${model}] attempt ${attempt}: ${message}`);
+        console.warn(`[narrative] failed — ${errors[errors.length - 1]}`);
+
+        // If we already started writing, we can't retry — just end
+        if (res.headersSent && !res.writableEnded) {
+          console.error('[narrative] headers already sent, cannot retry');
+          clearTimeout(timeoutId);
+          res.end();
+          return;
+        }
+
+        // Rate limit → skip remaining attempts for this model
+        if (message.includes('429') || message.toLowerCase().includes('rate limit')) {
+          console.warn(`[narrative] rate limit on ${model}, switching model`);
           break;
         }
-        const text = chunk.text();
-        if (text) {
-          narrativeText += text;
-          res.write(text);
+
+        // Exponential backoff before next retry
+        const isLast = model === MODELS[MODELS.length - 1] && attempt === MAX_RETRIES;
+        if (!isLast) {
+          await sleep(RETRY_DELAY_MS * attempt);
         }
       }
-    } catch (streamErr: unknown) {
-      // Streaming failed — fall back to non-streaming with lite model
-      console.warn('Streaming failed, falling back to non-streaming:', streamErr);
-      narrativeText = '';
-
-      const liteModel = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-lite' });
-      const result = await liteModel.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      });
-      narrativeText = result.response.text();
-      if (!res.writableEnded && narrativeText) {
-        res.write(narrativeText);
-      }
     }
+  }
 
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.error('narrative error:', message);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Narrative generation failed. Please try again.' });
-      return;
-    }
-  } finally {
-    clearTimeout(timeoutId);
-    if (!res.writableEnded) res.end();
+  // All models and retries exhausted
+  clearTimeout(timeoutId);
+  console.error('[narrative] all retries exhausted:', errors.join(' | '));
+
+  if (!res.headersSent) {
+    res.status(500).json({
+      error: 'Narrative generation failed after multiple attempts. Please try again.',
+    });
+  } else if (!res.writableEnded) {
+    res.end();
   }
 }
