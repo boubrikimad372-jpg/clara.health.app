@@ -180,6 +180,22 @@ FRAME 2 — CLINICAL RECORD:
 - summaryTable: ALWAYS use ${outputLangName} for ALL labels. NEVER use English labels when output language is not English.
   Provide exactly 4 rows: Age (value: "${userData.age || 'N/A'}"), Pain Scale (from answers or "—"), Location (from symptoms), Duration (from symptoms or "—").
 - doctorQuestions: 4 first-person questions to ask the doctor.
+  STRICT RULES for doctorQuestions:
+  * Every question MUST reference the patient's actual data: her specific symptom, location, duration, pain character, or context from her answers.
+  * BANNED: any generic question that could apply to any patient (e.g. "What causes this pain?", "What tests do you recommend?", "What are treatment options?", "How can I manage symptoms?"). These are FORBIDDEN.
+  * Each question must name a specific anatomical location, condition, or clinical detail from her case.
+  * If the pain is abdominal/pelvic or occurs around the menstrual cycle, at least 2 questions MUST address gynecological possibilities (e.g. dysmenorrhea, endometriosis, ovarian cysts, PCOS).
+  * Use proper medical terminology in the question itself (e.g. "dysmenorrhea", "Mittelschmerz", "IBS", "pelvic inflammatory disease").
+  * Questions must be in ${outputLangName}. If Arabic, include the English medical term in brackets.
+  * Good examples:
+    - "Could my lower abdominal pain that worsens during menstruation be a sign of endometriosis [بطانة الرحم المهاجرة]?"
+    - "Given that my pain is burning and located in the upper abdomen, could this be gastritis or a peptic ulcer?"
+    - "Should I get a pelvic ultrasound to rule out ovarian cysts given my pain peaks at ovulation?"
+    - "My pain scale was 7-8 and movement makes it worse — does this warrant an urgent physical examination?"
+  * Bad examples (FORBIDDEN):
+    - "What are the possible causes of my pain?" ← too generic
+    - "What tests do I need?" ← too generic
+    - "How can I prevent future episodes?" ← not specific to her case
 
 CRITICAL: narrative must be a 1-sentence placeholder. summaryTable labels MUST be in ${outputLangName}.
 RESPOND WITH ONLY the JSON object. No markdown. No code fences. No explanation.
